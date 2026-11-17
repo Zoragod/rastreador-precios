@@ -68,7 +68,35 @@ def _scrapear_toscrape(soup: BeautifulSoup) -> Optional[float]:
         return limpiar_precio(precio_tag.get_text())
     return None
 
-def _scrapear_steam(soup: BeautifulSoup) -> Optional[float]:
+def _scrapear_steam_api(url: str, timeout: int = 12) -> Optional[float]:
+    """
+    Utiliza la API oficial de la tienda de Steam con el parámetro cc=pe (Perú)
+    para obtener el precio exacto en Soles garantizado, sin bloqueos de región ni agegate.
+    """
+    match = re.search(r"/app/(\d+)", url)
+    if not match:
+        return None
+        
+    app_id = match.group(1)
+    url_api = f"https://store.steampowered.com/api/appdetails?appids={app_id}&cc=pe&filters=price_overview"
+    
+    try:
+        resp = requests.get(url_api, headers=DEFAULT_HEADERS, timeout=timeout)
+        if resp.status_code == 200:
+            data = resp.json().get(app_id, {})
+            if data.get("success"):
+                game_data = data.get("data", {})
+                if game_data.get("is_free"):
+                    return 0.0
+                price_overview = game_data.get("price_overview")
+                if price_overview and "final" in price_overview:
+                    return round(price_overview["final"] / 100.0, 2)
+    except Exception:
+        pass
+    return None
+
+def _scrapear_steam_html(soup: BeautifulSoup) -> Optional[float]:
+    """Respaldo por HTML si la API no estuviera disponible."""
     meta_price = soup.select_one("meta[itemprop='price']")
     if meta_price and meta_price.get("content"):
         try:
@@ -129,7 +157,15 @@ def extraer_precio(url: str, timeout: int = 15) -> Dict[str, Any]:
         "url": url
     }
 
-    # Detección temprana de tiendas con barrera anti-bot estricta
+    # Para Steam: usamos directamente la API oficial de Steam con moneda peruana (cc=pe)
+    if tienda == "Steam":
+        precio_steam = _scrapear_steam_api(url, timeout=timeout)
+        if precio_steam is not None:
+            resultado["precio"] = precio_steam
+            return resultado
+        # Si la API no devolviera precio (ej: paquetes especiales), continuará al scraper HTML abajo
+
+    # Detección temprana de Mercado Libre
     if tienda == "Mercado Libre":
         resultado["error"] = (
             "Mercado Libre cuenta con protección anti-bot (Akamai Challenge) que bloquea el rastreo automatizado. "
@@ -154,8 +190,8 @@ def extraer_precio(url: str, timeout: int = 15) -> Dict[str, Any]:
         return resultado
 
     try:
-        # Si la respuesta contiene retos anti-bot tipo Cloudflare o Akamai
-        if "challenge" in response.text.lower() or "suspicious-traffic" in response.text.lower():
+        # Detección precisa de retos anti-bot sin falsos positivos en descripciones de juegos
+        if "suspicious-traffic-frontend" in response.text or "cf-chl-" in response.text or "challenge-platform" in response.text:
             resultado["error"] = "La tienda bloqueó la consulta con un reto anti-bot. Registra el precio manualmente."
             return resultado
 
@@ -165,7 +201,7 @@ def extraer_precio(url: str, timeout: int = 15) -> Dict[str, Any]:
         if tienda == "Books to Scrape":
             precio = _scrapear_toscrape(soup)
         elif tienda == "Steam":
-            precio = _scrapear_steam(soup)
+            precio = _scrapear_steam_html(soup)
 
         if precio is None:
             precio = _scrapear_generico(soup)
