@@ -62,31 +62,31 @@ if smtp_listo:
     cfg_smtp = notifier.obtener_config_smtp()
     st.sidebar.success(f"🟢 Activo: alertas a **{cfg_smtp['destinatario']}**")
     if st.sidebar.button("📨 Enviar correo de prueba", use_container_width=True):
-        with st.sidebar.status("Enviando correo de prueba..."):
+        with st.sidebar.status("Conectando con el servidor de correo..."):
             ok, msj = notifier.enviar_correo_prueba()
             if ok:
                 st.sidebar.success(msj)
             else:
-                st.sidebar.error(msj)
+                st.sidebar.error(f"Error: {msj}")
 else:
-    st.sidebar.warning("🟡 Correo no configurado. Configura tu correo en el archivo `.env` para recibir alertas.")
-    with st.sidebar.expander("ℹ️ ¿Cómo activar alertas a mi correo?"):
+    st.sidebar.error("🔴 Correo no configurado en Render")
+    with st.sidebar.expander("ℹ️ ¿Cómo activar alertas en Render?"):
         st.markdown("""
-        1. Abre el archivo `.env` en la raíz del proyecto.
-        2. Configura tu cuenta de Gmail:
-           - `SMTP_USER=tu_correo@gmail.com`
-           - `SMTP_PASSWORD=tu_contraseña_de_aplicacion`
-           - `EMAIL_NOTIFICACION=tu_correo_destino@gmail.com`
-        3. *Nota para Gmail:* Requiere crear una **Contraseña de Aplicación** de 16 letras en [Google App Passwords](https://myaccount.google.com/apppasswords).
+        En **Render Dashboard** ➔ tu Web Service ➔ pestaña **Environment**:
+        Agrega estas variables:
+        - `SMTP_SERVER`: `smtp.gmail.com`
+        - `SMTP_PORT`: `587`
+        - `SMTP_USER`: tu correo de Gmail
+        - `SMTP_PASSWORD`: tu contraseña de aplicación de 16 letras
+        - `EMAIL_NOTIFICACION`: tu correo destino
         """)
 
 st.sidebar.divider()
 st.sidebar.header("➕ Registrar Nuevo Producto")
 
 with st.sidebar.form("form_nuevo_producto", clear_on_submit=True):
-    nombre_prod = st.text_input("Nombre del producto*", placeholder="Ej. Tarjeta de Video RTX 5070 o Terraria")
+    nombre_prod = st.text_input("Nombre del producto*", placeholder="Ej. Persona 5 Tactica o Terraria")
     
-    # Obtener lista de tiendas de la BD
     try:
         tiendas_disponibles = db.obtener_tiendas()
         opciones_tiendas = {t["nombre"]: t["id_tienda"] for t in tiendas_disponibles}
@@ -94,12 +94,10 @@ with st.sidebar.form("form_nuevo_producto", clear_on_submit=True):
         opciones_tiendas = {"Steam": 2, "Mercado Libre": 3, "Books to Scrape": 1, "Otro": 5}
 
     nombre_tienda = st.selectbox("Tienda*", options=list(opciones_tiendas.keys()))
-    url_prod = st.text_input("URL del producto*", placeholder="https://www.mercadolibre.com.pe/... o https://store.steampowered.com/...")
+    url_prod = st.text_input("URL del producto*", placeholder="https://store.steampowered.com/app/...")
     precio_objetivo = st.number_input(f"Precio objetivo ({MONEDA})*", min_value=0.0, step=1.0, format="%.2f")
     
-    # Permitir ingresar precio inicial opcionalmente si el usuario ya lo conoce
-    precio_inicial_manual = st.number_input(f"Precio actual conocido ({MONEDA}) - Opcional", min_value=0.0, step=1.0, format="%.2f", help="Útil si la tienda tiene protecciones anti-bot que impiden el scraping automático.")
-    
+    precio_inicial_manual = st.number_input(f"Precio actual conocido ({MONEDA}) - Opcional", min_value=0.0, step=1.0, format="%.2f")
     scrapear_inmediato = st.checkbox("Intentar extraer precio actual automáticamente con el scraper", value=True)
     
     submit_producto = st.form_submit_button("Guardar Producto", use_container_width=True)
@@ -116,43 +114,51 @@ with st.sidebar.form("form_nuevo_producto", clear_on_submit=True):
                     id_tienda = db.obtener_o_crear_tienda(nombre_tienda)
                 
                 nuevo_id = db.crear_producto(nombre_prod, id_tienda, url_prod, precio_objetivo)
-                st.sidebar.success(f"✅ ¡Producto '{nombre_prod}' registrado con éxito!")
-                
                 precio_registrado = None
                 
-                # Si el usuario ingresó un precio manual inicial:
                 if precio_inicial_manual > 0:
                     db.registrar_precio(nuevo_id, precio_inicial_manual)
                     precio_registrado = precio_inicial_manual
-                    st.sidebar.info(f"💵 Precio inicial ingresado: {MONEDA} {precio_inicial_manual:.2f}")
-                # O si marcó intentar scrapear:
                 elif scrapear_inmediato:
-                    with st.spinner("Consultando precio con el scraper..."):
-                        resultado = scraper.extraer_precio(url_prod)
-                        if resultado["precio"] is not None:
-                            db.registrar_precio(nuevo_id, resultado["precio"])
-                            precio_registrado = resultado["precio"]
-                            st.sidebar.info(f"💵 Precio inicial detectado: {MONEDA} {resultado['precio']:.2f}")
-                        else:
-                            st.sidebar.warning(f"⚠️ {resultado['error']}")
+                    resultado = scraper.extraer_precio(url_prod)
+                    if resultado["precio"] is not None:
+                        db.registrar_precio(nuevo_id, resultado["precio"])
+                        precio_registrado = resultado["precio"]
                 
-                # Si de entrada está en oferta, disparar notificación si corresponde
-                if precio_registrado is not None and precio_registrado <= precio_objetivo and smtp_listo:
-                    ok, msj = notifier.enviar_alerta_oferta(
-                        nombre_producto=nombre_prod,
-                        tienda=nombre_tienda,
-                        url_producto=url_prod,
-                        precio_actual=precio_registrado,
-                        precio_objetivo=precio_objetivo,
-                        moneda=MONEDA
-                    )
-                    if ok:
-                        db.actualizar_estado_notificacion(nuevo_id, True)
-                        st.sidebar.success("📧 ¡Alerta de oferta enviada a tu correo!")
+                # Enviar notificación si de entrada está en oferta
+                if precio_registrado is not None and precio_registrado <= precio_objetivo:
+                    if smtp_listo:
+                        ok, msj = notifier.enviar_alerta_oferta(
+                            nombre_producto=nombre_prod,
+                            tienda=nombre_tienda,
+                            url_producto=url_prod,
+                            precio_actual=precio_registrado,
+                            precio_objetivo=precio_objetivo,
+                            moneda=MONEDA
+                        )
+                        if ok:
+                            db.actualizar_estado_notificacion(nuevo_id, True)
+                            st.session_state["flash_msg"] = ("success", f"🎉 ¡Producto '{nombre_prod}' registrado y alerta enviada a tu correo!")
+                        else:
+                            st.session_state["flash_msg"] = ("warning", f"Producto guardado pero falló el envío de correo: {msj}")
+                    else:
+                        st.session_state["flash_msg"] = ("info", f"Producto '{nombre_prod}' registrado. (Configura el correo en Render para recibir alertas).")
+                else:
+                    st.session_state["flash_msg"] = ("success", f"✅ ¡Producto '{nombre_prod}' registrado con éxito!")
                 
                 st.rerun()
             except Exception as e:
                 st.sidebar.error(f"❌ Error al guardar producto: {e}")
+
+# Mensaje flash de sesión si existe
+if "flash_msg" in st.session_state:
+    tipo_msg, texto_msg = st.session_state.pop("flash_msg")
+    if tipo_msg == "success":
+        st.success(texto_msg)
+    elif tipo_msg == "warning":
+        st.warning(texto_msg)
+    else:
+        st.info(texto_msg)
 
 # --- Sección de Métricas Globales y Botón de Actualización ---
 try:
@@ -174,6 +180,7 @@ with col_btn:
             actualizados = 0
             bloqueados = 0
             alertas_enviadas = 0
+            errores_correo = []
 
             for idx, prod in enumerate(productos_resumen):
                 progress_bar.progress((idx + 1) / total, text=f"Consultando: {prod['nombre']} ({idx+1}/{total})")
@@ -201,6 +208,8 @@ with col_btn:
                             if ok:
                                 db.actualizar_estado_notificacion(prod["id_producto"], True)
                                 alertas_enviadas += 1
+                            else:
+                                errores_correo.append(f"{prod['nombre']}: {msj}")
                     else:
                         if ya_notificado:
                             db.actualizar_estado_notificacion(prod["id_producto"], False)
@@ -209,13 +218,16 @@ with col_btn:
 
             progress_bar.empty()
             
-            mensajes_resumen = [f"Actualizados automáticamente: {actualizados}"]
+            # Guardar resumen en sesión para que persista tras el rerun
+            detalles_resultado = [f"Actualizados: {actualizados}"]
             if alertas_enviadas > 0:
-                mensajes_resumen.append(f"📧 {alertas_enviadas} alerta(s) de oferta enviada(s)")
+                detalles_resultado.append(f"📧 {alertas_enviadas} alerta(s) enviada(s) a tu correo")
+            if errores_correo:
+                detalles_resultado.append(f"❌ Error de correo: {'; '.join(errores_correo)}")
             if bloqueados > 0:
-                mensajes_resumen.append(f"ℹ️ {bloqueados} producto(s) requieren ingreso manual (anti-bot)")
+                detalles_resultado.append(f"ℹ️ {bloqueados} requieren ingreso manual")
                 
-            st.info(" | ".join(mensajes_resumen))
+            st.session_state["flash_msg"] = ("info" if not errores_correo else "warning", " | ".join(detalles_resultado))
             st.rerun()
 
 total_prods = len(productos_resumen)
@@ -243,10 +255,9 @@ else:
         p_min = f"{MONEDA} {float(p['precio_minimo']):.2f}" if p["precio_minimo"] is not None else "Sin lectura"
         p_obj = f"{MONEDA} {float(p['precio_objetivo']):.2f}"
         
-        # Alerta visual si precio actual <= objetivo
         if p["precio_actual"] is not None:
             if p["alerta_alcanzada"]:
-                notif_txt = " (📧 Notificado)" if p.get("notificado") else ""
+                notif_txt = " (📧 Notificado)" if p.get("notificado") else " (Pendiente de envío)"
                 estado = f"🎯 ¡EN OFERTA!{notif_txt}"
             else:
                 diferencia = float(p["precio_actual"]) - float(p["precio_objetivo"])
@@ -294,8 +305,32 @@ if productos_resumen:
         st.write("")
         if st.button("🗑️ Eliminar este producto", type="secondary", use_container_width=True):
             if db.eliminar_producto(prod_id_seleccionado):
-                st.success("Producto eliminado correctamente.")
+                st.session_state["flash_msg"] = ("success", "Producto eliminado correctamente.")
                 st.rerun()
+
+    # Si está en oferta pero no se ha enviado el correo, botón para enviarlo con 1 clic
+    if prod_detalle and prod_detalle.get("alerta_alcanzada"):
+        col_alert_txt, col_alert_btn = st.columns([3, 1])
+        with col_alert_txt:
+            st.info(f"🎯 **{prod_detalle['nombre']}** está en oferta ({MONEDA} {float(prod_detalle['precio_actual']):.2f} $\\le$ {MONEDA} {float(prod_detalle['precio_objetivo']):.2f}).")
+        with col_alert_btn:
+            if st.button("📨 Enviar alerta a mi correo ahora", use_container_width=True):
+                with st.spinner("Enviando correo de alerta..."):
+                    ok, msj = notifier.enviar_alerta_oferta(
+                        nombre_producto=prod_detalle["nombre"],
+                        tienda=prod_detalle["tienda"],
+                        url_producto=prod_detalle["url_producto"],
+                        precio_actual=float(prod_detalle["precio_actual"]),
+                        precio_objetivo=float(prod_detalle["precio_objetivo"]),
+                        precio_minimo=float(prod_detalle["precio_minimo"]) if prod_detalle["precio_minimo"] else float(prod_detalle["precio_actual"]),
+                        moneda=MONEDA
+                    )
+                    if ok:
+                        db.actualizar_estado_notificacion(prod_id_seleccionado, True)
+                        st.success(f"🎉 ¡Correo de oferta enviado a tu Gmail con éxito!")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ No se pudo enviar el correo: {msj}")
 
     # Formulario para registrar o actualizar el precio manualmente
     with st.expander("✏️ Registrar o actualizar precio manualmente (Ideal para Mercado Libre o tiendas con Anti-Bot)", expanded=(prod_detalle["precio_actual"] is None)):
@@ -326,25 +361,25 @@ if productos_resumen:
                             )
                             if ok:
                                 db.actualizar_estado_notificacion(prod_id_seleccionado, True)
-                                st.success("🎉 ¡Precio guardado y alerta de oferta enviada a tu correo!")
+                                st.session_state["flash_msg"] = ("success", "🎉 ¡Precio guardado y alerta de oferta enviada a tu correo!")
+                            else:
+                                st.session_state["flash_msg"] = ("warning", f"Precio guardado, pero error al enviar correo: {msj}")
                     else:
-                        st.success(f"✅ ¡Precio de {MONEDA} {precio_manual_val:.2f} registrado correctamente!")
+                        st.session_state["flash_msg"] = ("success", f"✅ ¡Precio de {MONEDA} {precio_manual_val:.2f} registrado correctamente!")
                     st.rerun()
 
     # Obtener el historial para la gráfica
     historial = db.obtener_historial(prod_id_seleccionado)
     
     if not historial:
-        st.warning("Este producto aún no cuenta con lecturas de precios en el historial. Puedes ingresar la primera en el formulario de arriba.")
+        st.warning("Este producto aún no cuenta con lecturas de precios en el historial.")
     else:
         df_historial = pd.DataFrame(historial)
         df_historial["precio"] = df_historial["precio"].astype(float)
         df_historial["fecha_formato"] = pd.to_datetime(df_historial["fecha_registro"])
 
-        # Crear figura interactiva con Plotly
         fig = go.Figure()
 
-        # Línea de historial de precios
         fig.add_trace(go.Scatter(
             x=df_historial["fecha_formato"],
             y=df_historial["precio"],
@@ -354,7 +389,6 @@ if productos_resumen:
             marker=dict(size=8, color="#0d47a1")
         ))
 
-        # Línea de referencia del Precio Objetivo
         if prod_detalle:
             p_obj_val = float(prod_detalle["precio_objetivo"])
             fig.add_trace(go.Scatter(
