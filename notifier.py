@@ -13,7 +13,7 @@ SIMBOLO_MONEDA = "S/."
 def obtener_config_smtp():
     """Obtiene la configuración SMTP desde las variables de entorno."""
     return {
-        "servidor": os.getenv("SMTP_SERVER", "smtp.gmail.com"),
+        "servidor": os.getenv("SMTP_SERVER", "smtp.gmail.com").strip(),
         "puerto": int(os.getenv("SMTP_PORT", 587)),
         "usuario": os.getenv("SMTP_USER", "").strip(),
         "password": os.getenv("SMTP_PASSWORD", "").replace(" ", "").strip(),
@@ -40,7 +40,7 @@ def enviar_alerta_oferta(
     cfg = obtener_config_smtp()
     
     if not esta_configurado():
-        return False, "SMTP no configurado en el archivo .env (faltan SMTP_USER o SMTP_PASSWORD)."
+        return False, "SMTP no configurado en las variables de entorno de Render (faltan SMTP_USER o SMTP_PASSWORD)."
 
     ahorro = precio_objetivo - precio_actual
     ahorro_txt = f"¡Ahorras {moneda} {ahorro:.2f} respecto a tu meta!" if ahorro > 0 else "¡Alcanzó exactamente tu precio objetivo!"
@@ -194,14 +194,14 @@ def enviar_correo_prueba(destinatario: Optional[str] = None) -> Tuple[bool, str]
     dest = destinatario or cfg["destinatario"]
 
     if not esta_configurado():
-        return False, "Faltan credenciales SMTP en el archivo .env."
+        return False, "Faltan credenciales SMTP. Revisa la sección Environment Variables en Render."
 
     asunto = "✅ Prueba de Notificaciones - Rastreador de Precios"
-    cuerpo_texto = "¡Hola! La conexión con tu servidor de correo funciona perfectamente. Recibirás alertas aquí cuando un juego o producto baje de precio."
+    cuerpo_texto = "¡Hola! La conexión con tu servidor de correo funciona perfectamente desde Render."
     cuerpo_html = """
     <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
         <h2 style="color: #10b981;">✅ Conexión SMTP Exitosa</h2>
-        <p>¡Hola! Las notificaciones automáticas de tu <strong>Rastreador de Precios y Ofertas</strong> están listas y funcionando.</p>
+        <p>¡Hola! Las notificaciones automáticas de tu <strong>Rastreador de Precios y Ofertas</strong> están funcionando perfectamente en Render.</p>
         <p>A partir de ahora recibirás un correo automático cada vez que un producto alcance o supere tu precio objetivo en <strong>Soles Peruanos (S/.)</strong>.</p>
     </div>
     """
@@ -227,28 +227,42 @@ def _enviar_email(
     cuerpo_texto: str,
     cuerpo_html: str
 ) -> Tuple[bool, str]:
-    """Gestiona la conexión y envío vía SMTP."""
-    try:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = asunto
-        msg["From"] = f"Rastreador de Precios <{remitente}>"
-        msg["To"] = destinatario
+    """
+    Gestiona la conexión y envío vía SMTP con soporte dual para puertos 587 (STARTTLS) y 465 (SSL).
+    Si un puerto falla o da timeout en servidores cloud (Render), intenta automáticamente con el otro.
+    """
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = asunto
+    msg["From"] = f"Rastreador de Precios <{remitente}>"
+    msg["To"] = destinatario
 
-        msg.attach(MIMEText(cuerpo_texto, "plain", "utf-8"))
-        msg.attach(MIMEText(cuerpo_html, "html", "utf-8"))
+    msg.attach(MIMEText(cuerpo_texto, "plain", "utf-8"))
+    msg.attach(MIMEText(cuerpo_html, "html", "utf-8"))
 
-        if puerto == 465:
-            with smtplib.SMTP_SSL(servidor, puerto, timeout=15) as server:
-                server.login(remitente, password)
-                server.send_message(msg)
-        else:
-            with smtplib.SMTP(servidor, puerto, timeout=15) as server:
-                server.starttls()
-                server.login(remitente, password)
-                server.send_message(msg)
+    # Intentar primero con el puerto configurado
+    puertos_a_intentar = [puerto]
+    puerto_alterno = 465 if puerto == 587 else 587
+    puertos_a_intentar.append(puerto_alterno)
 
-        return True, f"Correo enviado exitosamente a {destinatario}."
-    except smtplib.SMTPAuthenticationError:
-        return False, "Error de autenticación SMTP: Verifica tu usuario y contraseña de aplicación."
-    except Exception as e:
-        return False, f"Error al enviar correo: {e}"
+    ultimo_error = None
+
+    for p in puertos_a_intentar:
+        try:
+            if p == 465:
+                with smtplib.SMTP_SSL(servidor, p, timeout=12) as server:
+                    server.login(remitente, password)
+                    server.send_message(msg)
+            else:
+                with smtplib.SMTP(servidor, p, timeout=12) as server:
+                    server.starttls()
+                    server.login(remitente, password)
+                    server.send_message(msg)
+
+            return True, f"Correo enviado exitosamente a {destinatario}."
+        except smtplib.SMTPAuthenticationError:
+            return False, "Error de autenticación SMTP: Verifica que la Contraseña de Aplicación de 16 letras sea correcta."
+        except Exception as e:
+            ultimo_error = e
+            continue
+
+    return False, f"Error al enviar correo (se intentaron puertos 587 y 465): {ultimo_error}"
